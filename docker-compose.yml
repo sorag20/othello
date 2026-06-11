@@ -1,0 +1,81 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: othello-db
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: othello
+      MYSQL_USER: othello
+      MYSQL_PASSWORD: othello
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - othello-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: on-failure:3
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: othello-backend
+    environment:
+      DATABASE_URL: mysql+pymysql://othello:othello@db:3306/othello
+      SECRET_KEY: docker-secret-key
+      AI_MODEL_PATH: models/weights/model.pt
+      AI_SIMULATIONS: "50"
+      AI_TIMEOUT: "10.0"
+      SESSION_TIMEOUT: "300"
+      FLASK_ENV: production
+    ports:
+      - "5001:5000"
+    networks:
+      - othello-network
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: on-failure:3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: othello-frontend
+    environment:
+      API_BASE_URL: http://backend:5000
+    ports:
+      - "8080:80"
+    networks:
+      - othello-network
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: on-failure:3
+
+networks:
+  othello-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    name: othello_mysql_data

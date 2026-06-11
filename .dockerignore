@@ -1,0 +1,7 @@
+# Root .dockerignore
+.git
+.gitignore
+.kiro
+.vscode
+*.md
+LICENSE
