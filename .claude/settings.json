@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls -la)",
+      "Bash(python -m pytest tests/test_mcts.py tests/test_self_play.py -q)"
+    ]
+  }
+}

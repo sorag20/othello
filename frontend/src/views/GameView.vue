@@ -32,6 +32,12 @@
       @new-game="handleNewGame"
     />
 
+    <GameSetup
+      :visible="gameStore.showSetup"
+      :edax-available="gameStore.edaxAvailable"
+      @start="handleSetupStart"
+    />
+
     <!-- Error toast -->
     <Transition name="error-fade">
       <div
@@ -54,14 +60,13 @@ import GameBoard from '../components/GameBoard.vue'
 import GameStatus from '../components/GameStatus.vue'
 import ThinkingIndicator from '../components/ThinkingIndicator.vue'
 import GameResult from '../components/GameResult.vue'
+import GameSetup from '../components/GameSetup.vue'
 
 const gameStore = useGameStore()
 
-/**
- * マウント時に自動的に新規ゲームを開始
- */
-onMounted(() => {
-  gameStore.startNewGame()
+onMounted(async () => {
+  await gameStore.fetchEdaxAvailable()
+  gameStore.showSetup = true
 })
 
 /**
@@ -99,11 +104,17 @@ async function handleCellClick(row, col) {
 }
 
 /**
- * 新しいゲーム開始処理
- * GameResultモーダルからのイベントで呼び出される
+ * 設定ダイアログからゲーム開始
+ */
+function handleSetupStart({ opponentType, edaxLevel }) {
+  gameStore.startNewGame({ opponentType, edaxLevel })
+}
+
+/**
+ * ゲーム終了後の「もう一度」→ 設定ダイアログを再表示
  */
 function handleNewGame() {
-  gameStore.startNewGame()
+  gameStore.showSetupDialog()
 }
 </script>
 

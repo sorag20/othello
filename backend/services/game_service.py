@@ -31,19 +31,26 @@ class GameService:
     ゲーム終了判定、DB永続化を統括する。
     """
 
-    def __init__(self, ai_engine: Optional[AIEngine] = None):
-        """Initialize with optional AI engine.
+    def __init__(self, ai_engine: Optional[AIEngine] = None, edax_engine=None, minimax_engine=None):
+        """Initialize with optional AI engines.
 
         Args:
-            ai_engine: AIEngine instance. If None, AI moves will be skipped.
+            ai_engine: Internal MCTS AIEngine instance.
+            edax_engine: EdaxEngine factory callable (level) -> EdaxEngine instance.
+                         Stored as a dict of {level: EdaxEngine}.
+            minimax_engine: MinimaxEngine instance, or None if unavailable.
         """
         self._ai_engine = ai_engine
+        self._edax_engine = edax_engine  # EdaxEngine instance or None
+        self._minimax_engine = minimax_engine  # MinimaxEngine instance or None
 
-    def create_game(self) -> dict:
+    def create_game(self, opponent_type: str = 'internal', edax_level: Optional[int] = None) -> dict:
         """Create new game with player as black, AI as white.
 
-        Creates a new GameSession with the initial board state,
-        saves to DB, and returns game data including legal moves.
+        Args:
+            opponent_type: 'internal' for MCTS AI, 'edax' for edax-reversi,
+                'minimax' for the bitboard alpha-beta engine.
+            edax_level: Edax search depth level (1-60). Only used when opponent_type='edax'.
 
         Returns:
             dict: Game state response.
@@ -58,6 +65,8 @@ class GameService:
             current_turn='black',
             status='in_progress',
             move_sequence=[],
+            opponent_type=opponent_type,
+            edax_level=edax_level,
         )
 
         self._save_with_retry(game_session)
@@ -167,6 +176,13 @@ class GameService:
 
         return response
 
+    def _get_edax_engine_for_session(self, game_session: GameSession):
+        """Return an EdaxEngine configured for this session's level, or None."""
+        if self._edax_engine is None:
+            return None
+        level = game_session.edax_level or 1
+        return self._edax_engine(level)
+
     def get_game_state(self, game_id: str) -> dict:
         """Get current game state.
 
@@ -232,7 +248,19 @@ class GameService:
         # Compute AI move
         ai_move = None
         try:
-            if self._ai_engine is not None:
+            if game_session.opponent_type == 'edax':
+                edax = self._get_edax_engine_for_session(game_session)
+                if edax is not None:
+                    ai_move = edax.compute_move(board, ai_color, list(game_session.move_sequence or []))
+                if ai_move is None:
+                    logger.warning("Edax returned no move; falling back to first legal move")
+                    ai_move = legal_moves[0]
+            elif game_session.opponent_type == 'minimax':
+                if self._minimax_engine is not None:
+                    ai_move = self._minimax_engine.compute_move(board, ai_color)
+                else:
+                    ai_move = legal_moves[0]
+            elif self._ai_engine is not None:
                 ai_move = self._ai_engine.compute_move(board, ai_color)
             else:
                 # Fallback: pick first legal move if no AI engine
@@ -250,6 +278,9 @@ class GameService:
                 flipped=[],
                 passed=True,
             )
+        except Exception as e:
+            logger.error("Edax engine error: %s; falling back to first legal move", e)
+            ai_move = legal_moves[0]
 
         # Apply AI's move
         flipped = board.place_stone(ai_move[0], ai_move[1], ai_color)

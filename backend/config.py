@@ -24,6 +24,15 @@ class Config:
     AI_SIMULATIONS = int(os.environ.get('AI_SIMULATIONS', '800'))
     AI_TIMEOUT = float(os.environ.get('AI_TIMEOUT', '5.0'))
 
+    # Edax engine settings
+    EDAX_PATH = os.environ.get('EDAX_PATH', '')
+    EDAX_EVAL_PATH = os.environ.get('EDAX_EVAL_PATH', '')
+    EDAX_BOOK_PATH = os.environ.get('EDAX_BOOK_PATH', '')
+
+    # Minimax engine settings
+    MINIMAX_TIME_LIMIT = float(os.environ.get('MINIMAX_TIME_LIMIT', '3.0'))
+    MINIMAX_ENDGAME_EMPTY_THRESHOLD = int(os.environ.get('MINIMAX_ENDGAME_EMPTY_THRESHOLD', '10'))
+
     # Game session settings
     SESSION_TIMEOUT = int(os.environ.get('SESSION_TIMEOUT', '300'))
 

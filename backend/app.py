@@ -3,7 +3,10 @@
 import logging
 import os
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify
+
+load_dotenv()
 from flask_cors import CORS
 
 from config import Config, DevelopmentConfig, ProductionConfig, TestingConfig

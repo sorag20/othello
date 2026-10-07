@@ -202,6 +202,48 @@ class TestNeuralNetwork:
 
         assert -1.0 <= value <= 1.0
 
+    def test_predict_batch_empty(self):
+        """predict_batchが空リストで空リストを返す"""
+        nn = NeuralNetwork()
+        assert nn.predict_batch([], []) == []
+
+    def test_predict_batch_matches_predict(self):
+        """predict_batchがpredictをN回呼ぶのと同じ結果を返す"""
+        nn = NeuralNetwork()
+
+        board_empty = Board()
+        board_one_move = Board()
+        board_one_move.place_stone(2, 3, BLACK)
+
+        boards = [board_empty, board_one_move, Board()]
+        colors = [BLACK, WHITE, WHITE]
+
+        individual = [nn.predict(b, c) for b, c in zip(boards, colors)]
+        batched = nn.predict_batch(boards, colors)
+
+        assert len(batched) == len(individual)
+        for (policy1, value1), (policy2, value2) in zip(individual, batched):
+            assert np.allclose(policy1, policy2, atol=1e-5)
+            assert abs(value1 - value2) < 1e-5
+
+    def test_predict_batch_policy_shape_and_legal_mask(self):
+        """predict_batchのポリシーが正しい形状で、非合法手が0"""
+        nn = NeuralNetwork()
+        board = Board()
+        results = nn.predict_batch([board], [BLACK])
+
+        assert len(results) == 1
+        policy, value = results[0]
+        assert policy.shape == (64,)
+        assert isinstance(value, float)
+        assert abs(policy.sum() - 1.0) < 1e-6
+
+        legal_moves = board.get_legal_moves(BLACK)
+        legal_positions = {row * BOARD_SIZE + col for row, col in legal_moves}
+        for i in range(64):
+            if i not in legal_positions:
+                assert policy[i] == 0.0
+
     def test_save_and_load_weights(self):
         """重みの保存とロードが正しく動作する"""
         nn1 = NeuralNetwork()

@@ -25,14 +25,46 @@ game_bp = Blueprint('game', __name__)
 _game_service = None
 _history_service = None
 
+# Whether edax binary is available
+_edax_available = None
+
+
+def _check_edax_available() -> bool:
+    """Check once if the edax binary exists and return the result."""
+    global _edax_available
+    if _edax_available is None:
+        edax_path = current_app.config.get('EDAX_PATH', '')
+        _edax_available = bool(edax_path) and os.path.isfile(edax_path)
+        if _edax_available:
+            logger.info("Edax engine found at %s", edax_path)
+        else:
+            logger.info("Edax engine not found at %r; edax opponent unavailable", edax_path)
+    return _edax_available
+
+
+def _make_edax_factory():
+    """Return a callable (level) -> EdaxEngine, or None if edax is unavailable."""
+    if not _check_edax_available():
+        return None
+
+    edax_path = current_app.config['EDAX_PATH']
+    eval_path = current_app.config.get('EDAX_EVAL_PATH', '')
+    book_path = current_app.config.get('EDAX_BOOK_PATH', '')
+
+    def factory(level: int):
+        from ai.edax_engine import EdaxEngine
+        return EdaxEngine(
+            edax_path=edax_path,
+            eval_path=eval_path,
+            book_path=book_path,
+            level=level,
+        )
+
+    return factory
+
 
 def _get_game_service() -> GameService:
-    """Get or create the GameService instance (lazy initialization).
-
-    Attempts to load the AI engine from the configured model path.
-    If the model file doesn't exist (first-run scenario), the service
-    runs without AI — the AI will pick the first legal move as a fallback.
-    """
+    """Get or create the GameService instance (lazy initialization)."""
     global _game_service
     if _game_service is None:
         ai_engine = None
@@ -63,7 +95,17 @@ def _get_game_service() -> GameService:
                 model_path,
             )
 
-        _game_service = GameService(ai_engine=ai_engine)
+        from ai.minimax_engine import MinimaxEngine
+        minimax_engine = MinimaxEngine(
+            time_limit=current_app.config.get('MINIMAX_TIME_LIMIT', 3.0),
+            endgame_empty_threshold=current_app.config.get('MINIMAX_ENDGAME_EMPTY_THRESHOLD', 10),
+        )
+
+        _game_service = GameService(
+            ai_engine=ai_engine,
+            edax_engine=_make_edax_factory(),
+            minimax_engine=minimax_engine,
+        )
     return _game_service
 
 
@@ -99,17 +141,60 @@ def health_check():
     return jsonify({"status": "healthy"}), 200
 
 
+@game_bp.route('/edax/status', methods=['GET'])
+def edax_status():
+    """Return whether the edax engine is available.
+
+    Returns:
+        200: {"available": bool}
+    """
+    return jsonify({"available": _check_edax_available()}), 200
+
+
 @game_bp.route('/games', methods=['POST'])
 def create_game():
     """Create a new game.
 
+    Optional request body:
+        opponent_type: 'internal' (default), 'edax', or 'minimax'.
+        edax_level: integer 1-60 (default 1), used when opponent_type='edax'.
+
     Returns:
         201: GameResponse with initial board state.
+        400: Invalid parameters.
         500: Internal error.
     """
     try:
+        data = request.get_json(silent=True) or {}
+        opponent_type = data.get('opponent_type', 'internal')
+        edax_level = data.get('edax_level', 1)
+
+        if opponent_type not in ('internal', 'edax', 'minimax'):
+            return _error_response(
+                "INVALID_PARAMETERS",
+                "opponent_type must be 'internal', 'edax', or 'minimax'",
+                400,
+            )
+
+        if opponent_type == 'edax':
+            if not _check_edax_available():
+                return _error_response(
+                    "EDAX_UNAVAILABLE",
+                    "Edax engine is not available on this server",
+                    503,
+                )
+            if not isinstance(edax_level, int) or not (1 <= edax_level <= 60):
+                return _error_response(
+                    "INVALID_PARAMETERS",
+                    "edax_level must be an integer between 1 and 60",
+                    400,
+                )
+
         service = _get_game_service()
-        result = service.create_game()
+        result = service.create_game(
+            opponent_type=opponent_type,
+            edax_level=edax_level if opponent_type == 'edax' else None,
+        )
         return jsonify(result), 201
     except Exception as e:
         logger.exception("Unexpected error creating game")

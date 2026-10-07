@@ -16,7 +16,12 @@ export const useGameStore = defineStore('game', {
     isLoading: false,
     error: null,
     isThinking: false,
-    passed: false
+    passed: false,
+    // Opponent settings
+    opponentType: 'internal',
+    edaxLevel: 1,
+    edaxAvailable: false,
+    showSetup: true,
   }),
 
   getters: {
@@ -27,15 +32,39 @@ export const useGameStore = defineStore('game', {
 
   actions: {
     /**
-     * 新規ゲームを開始
+     * Edax利用可否をサーバーから取得してキャッシュ
      */
-    async startNewGame() {
+    async fetchEdaxAvailable() {
+      this.edaxAvailable = await gameApi.checkEdaxAvailable()
+    },
+
+    /**
+     * 設定ダイアログを表示して次のゲームを準備する
+     */
+    showSetupDialog() {
+      this.showSetup = true
+    },
+
+    /**
+     * 新規ゲームを開始
+     * @param {object} [options]
+     * @param {string} [options.opponentType]
+     * @param {number} [options.edaxLevel]
+     */
+    async startNewGame({ opponentType, edaxLevel } = {}) {
+      if (opponentType !== undefined) this.opponentType = opponentType
+      if (edaxLevel !== undefined) this.edaxLevel = edaxLevel
+
+      this.showSetup = false
       this.isLoading = true
       this.error = null
       this.passed = false
 
       try {
-        const data = await gameApi.createGame()
+        const data = await gameApi.createGame({
+          opponentType: this.opponentType,
+          edaxLevel: this.edaxLevel,
+        })
         this.gameId = data.id
         this.board = data.board
         this.currentTurn = data.current_turn
@@ -48,6 +77,7 @@ export const useGameStore = defineStore('game', {
         this.isThinking = false
       } catch (error) {
         this.error = error.message || 'ゲームの作成に失敗しました'
+        this.showSetup = true
       } finally {
         this.isLoading = false
       }
@@ -153,6 +183,7 @@ export const useGameStore = defineStore('game', {
       this.error = null
       this.isThinking = false
       this.passed = false
+      this.showSetup = true
     }
   }
 })

@@ -6,7 +6,7 @@ including board state, move history, result, and timestamps.
 
 import uuid
 
-from sqlalchemy import Column, String, Enum, JSON, DateTime, Index
+from sqlalchemy import Column, String, Enum, JSON, DateTime, Index, Integer
 from sqlalchemy.sql import func
 
 from models.database import db
@@ -32,6 +32,8 @@ class GameSession(db.Model):
         nullable=False,
         default='black'
     )
+    opponent_type = Column(String(32), nullable=False, default='internal')
+    edax_level = Column(Integer, nullable=True)
     started_at = Column(DateTime, nullable=False, server_default=func.now())
     ended_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

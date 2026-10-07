@@ -1,4 +1,41 @@
-.vscode
-*__pycache__
-*node_modules
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node / frontend build output
+node_modules/
+frontend/dist/
+
+# Environment variables (machine-specific paths, credentials)
+.env
+.env.*
+!.env.example
+
+# Claude Code personal settings
+.claude/settings.local.json
+
+# Logs and backups (train.py / evaluate.py recreate models/logs/ automatically)
 *.log
+*.bak
+backend/models/logs/
+
+# Model weights: only the production model.pt is versioned;
+# intermediate training checkpoints stay local
+backend/models/weights/*.pt
+!backend/models/weights/model.pt
+
+# CodinGame: publish the write-ups only, not the ready-to-paste bot source
+# (CodinGame asks players not to share copy-pasteable bot code)
+/codingame/*
+!/codingame/README.md
+!/codingame/archive/
+/codingame/archive/*
+!/codingame/archive/README.md

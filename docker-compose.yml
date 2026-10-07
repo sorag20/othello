@@ -35,6 +35,13 @@ services:
       AI_TIMEOUT: "10.0"
       SESSION_TIMEOUT: "300"
       FLASK_ENV: production
+      EDAX_PATH: /edax/bin/mEdax
+      EDAX_EVAL_PATH: /edax/data/eval.dat
+      EDAX_BOOK_PATH: /edax/data/book.dat
+      MINIMAX_TIME_LIMIT: "3.0"
+      MINIMAX_ENDGAME_EMPTY_THRESHOLD: "10"
+    volumes:
+      - /Users/sorag/dev/edax-reversi/data:/edax/data:ro
     ports:
       - "5001:5000"
     networks:

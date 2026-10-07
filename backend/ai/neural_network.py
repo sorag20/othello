@@ -4,7 +4,7 @@ Provides OthelloNet (ResNet-based nn.Module) with policy and value heads,
 and the NeuralNetwork wrapper class for prediction, encoding, and weight management.
 """
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -122,7 +122,12 @@ class NeuralNetwork:
         Raises:
             ModelLoadError: モデルファイルのロードに失敗した場合
         """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
         self.model = OthelloNet()
         self.model.to(self.device)
         self.model.eval()
@@ -158,16 +163,66 @@ class NeuralNetwork:
             policy_np = policy.squeeze(0).cpu().numpy()  # (64,)
             value_float = value.squeeze().item()
 
-        # Mask illegal moves
+        policy_np = self._mask_and_normalize(policy_np, board, color)
+
+        return policy_np, value_float
+
+    def predict_batch(
+        self, boards: List[Board], colors: List[int]
+    ) -> List[Tuple[np.ndarray, float]]:
+        """複数の盤面をまとめて1回のフォワードパスで評価する
+
+        MCTSの並列自己対戦（複数ゲームを同時に進める）で、各ゲームのリーフ評価を
+        1回のバッチ推論にまとめてGPU利用効率を上げるために使う。
+        predict() を len(boards) 回呼ぶのと数学的に同じ結果を返す。
+
+        Args:
+            boards: 盤面のリスト (長さ B)
+            colors: 各盤面での手番色のリスト (長さ B、boards と対応)
+
+        Returns:
+            (policy[64], value) のタプルのリスト（boards と同じ順序、同じ長さ）
+        """
+        if not boards:
+            return []
+
+        self.model.eval()
+        with torch.no_grad():
+            input_batch = torch.stack(
+                [self.encode_board(b, c) for b, c in zip(boards, colors)]
+            ).to(self.device)  # (B, 3, 8, 8)
+
+            policies, values = self.model(input_batch)
+
+            policies_np = policies.cpu().numpy()  # (B, 64)
+            values_np = values.squeeze(-1).cpu().numpy()  # (B,)
+
+        results = []
+        for board, color, policy_np, value in zip(boards, colors, policies_np, values_np):
+            masked_policy = self._mask_and_normalize(policy_np.copy(), board, color)
+            results.append((masked_policy, float(value)))
+        return results
+
+    def _mask_and_normalize(
+        self, policy_np: np.ndarray, board: Board, color: int
+    ) -> np.ndarray:
+        """非合法手をマスクして再正規化する（predict / predict_batch 共通処理）
+
+        Args:
+            policy_np: ネットワーク出力のポリシー shape (64,)
+            board: 評価対象の盤面
+            color: 手番色
+
+        Returns:
+            合法手のみ正規化済みのポリシー shape (64,)
+        """
         legal_moves = board.get_legal_moves(color)
         legal_mask = np.zeros(BOARD_SIZE * BOARD_SIZE, dtype=np.float32)
         for row, col in legal_moves:
             legal_mask[row * BOARD_SIZE + col] = 1.0
 
-        # Apply mask
         policy_np = policy_np * legal_mask
 
-        # Re-normalize
         policy_sum = policy_np.sum()
         if policy_sum > 0:
             policy_np = policy_np / policy_sum
@@ -179,7 +234,7 @@ class NeuralNetwork:
                 for row, col in legal_moves:
                     policy_np[row * BOARD_SIZE + col] = 1.0 / len(legal_moves)
 
-        return policy_np, value_float
+        return policy_np
 
     def encode_board(self, board: Board, color: int) -> torch.Tensor:
         """盤面を3×8×8テンソルにエンコード

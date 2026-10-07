@@ -37,14 +37,32 @@ function handleError(error) {
 export const gameApi = {
   /**
    * 新規ゲームを作成
+   * @param {object} [options]
+   * @param {string} [options.opponentType='internal'] - 'internal', 'edax', or 'minimax'
+   * @param {number} [options.edaxLevel=1] - Edax strength level (1-60)
    * @returns {Promise<object>} GameResponse
    */
-  async createGame() {
+  async createGame({ opponentType = 'internal', edaxLevel = 1 } = {}) {
     try {
-      const response = await apiClient.post('/games')
+      const body = { opponent_type: opponentType }
+      if (opponentType === 'edax') body.edax_level = edaxLevel
+      const response = await apiClient.post('/games', body)
       return response.data
     } catch (error) {
       handleError(error)
+    }
+  },
+
+  /**
+   * Edaxエンジンが利用可能かチェック
+   * @returns {Promise<boolean>}
+   */
+  async checkEdaxAvailable() {
+    try {
+      const response = await apiClient.get('/edax/status')
+      return response.data.available === true
+    } catch {
+      return false
     }
   },
 

@@ -290,3 +290,90 @@ class TestMCTSSearch:
 
         assert mcts_default.c_puct == 1.0
         assert mcts_custom.c_puct == 2.5
+
+
+class TestMCTSRunBatched:
+    """MCTS.run_batched（複数局同時探索によるバッチ推論）のテスト"""
+
+    def _create_mock_nn(self):
+        """predict と predict_batch が同じロジックを共有するモックNNを作成"""
+        nn = MagicMock()
+
+        def mock_predict(board, color):
+            legal_moves = board.get_legal_moves(color)
+            policy = np.zeros(64, dtype=np.float32)
+            if legal_moves:
+                prob = 1.0 / len(legal_moves)
+                for r, c in legal_moves:
+                    policy[r * BOARD_SIZE + c] = prob
+            return policy, 0.0
+
+        def mock_predict_batch(boards, colors):
+            return [mock_predict(b, c) for b, c in zip(boards, colors)]
+
+        nn.predict.side_effect = mock_predict
+        nn.predict_batch.side_effect = mock_predict_batch
+        return nn
+
+    def test_run_batched_single_root_matches_get_policy(self):
+        """1局だけをrun_batchedに渡した場合、get_policyと完全に同一の結果になることを確認
+
+        NN呼び出しをバッチ化のためにまとめるだけで、探索アルゴリズム自体
+        （SELECT/EXPAND/BACKPROPAGATEの順序や内容）は変えていないことの回帰テスト。
+        """
+        nn = self._create_mock_nn()
+        board = Board()
+
+        mcts_sequential = MCTS(neural_network=nn, simulations=30, c_puct=1.0)
+        policy_sequential = mcts_sequential.get_policy(board, BLACK, add_noise=False)
+
+        mcts_batched = MCTS(neural_network=nn, simulations=30, c_puct=1.0)
+        roots = mcts_batched.run_batched([(board, BLACK)], add_noise=False)
+        policy_batched = mcts_batched.root_visit_policy(roots[0])
+
+        assert policy_batched == pytest.approx(policy_sequential, abs=1e-9)
+
+    def test_run_batched_multiple_roots_independent(self):
+        """複数ルートを同時に探索しても、各ルートが独立に正しく探索されることを確認"""
+        nn = self._create_mock_nn()
+        mcts = MCTS(neural_network=nn, simulations=20, c_puct=1.0)
+
+        board = Board()
+        requests = [(board, BLACK) for _ in range(4)]
+        roots = mcts.run_batched(requests, add_noise=False)
+
+        assert len(roots) == 4
+        legal_moves = board.get_legal_moves(BLACK)
+        legal_indices = {r * BOARD_SIZE + c for r, c in legal_moves}
+
+        for root in roots:
+            total_visits = sum(child.visit_count for child in root.children.values())
+            assert total_visits == mcts.simulations
+            policy = mcts.root_visit_policy(root)
+            assert sum(policy) == pytest.approx(1.0, abs=1e-6)
+            for i in range(64):
+                if i not in legal_indices:
+                    assert policy[i] == 0.0
+
+    def test_run_batched_no_legal_moves_returns_empty_children(self):
+        """合法手がないルート（例: 全マス埋まった盤面）はchildrenが空で返ることを確認"""
+        nn = self._create_mock_nn()
+        mcts = MCTS(neural_network=nn, simulations=10, c_puct=1.0)
+
+        full_black_board = Board(state=[[BLACK] * BOARD_SIZE for _ in range(BOARD_SIZE)])
+        roots = mcts.run_batched([(full_black_board, BLACK)], add_noise=False)
+
+        assert roots[0].children == {}
+        assert mcts.root_visit_policy(roots[0]) == [0.0] * 64
+
+    def test_run_batched_add_noise_still_sums_to_one(self):
+        """add_noise=Trueでもポリシーが合法手のみで正規化されていることを確認"""
+        nn = self._create_mock_nn()
+        mcts = MCTS(neural_network=nn, simulations=20, c_puct=1.0)
+
+        board = Board()
+        roots = mcts.run_batched([(board, BLACK), (board, BLACK)], add_noise=True)
+
+        for root in roots:
+            policy = mcts.root_visit_policy(root)
+            assert sum(policy) == pytest.approx(1.0, abs=1e-6)

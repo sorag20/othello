@@ -135,12 +135,23 @@ class MCTS:
         best_move = max(root.children.keys(), key=lambda m: root.children[m].visit_count)
         return best_move
 
-    def get_policy(self, board: Board, color: int) -> List[float]:
+    def get_policy(
+        self,
+        board: Board,
+        color: int,
+        add_noise: bool = False,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
+    ) -> List[float]:
         """MCTS探索後のポリシー（訪問比率）を返す
 
         Args:
             board: 現在の盤面
             color: 現在の手番色
+            add_noise: Trueの場合、ルートの事前確率にディリクレノイズを加える
+                （セルフプレイでの探索多様性確保のため。実対局では使用しない）
+            dirichlet_alpha: ディリクレ分布のパラメータ
+            dirichlet_epsilon: ノイズの混合率
 
         Returns:
             64要素のリスト（各セルの訪問比率、合計1.0）
@@ -153,6 +164,9 @@ class MCTS:
         if not root.children:
             # 合法手がない場合、均一分布を返す
             return [1.0 / 64.0] * 64
+
+        if add_noise:
+            self._add_dirichlet_noise(root, dirichlet_alpha, dirichlet_epsilon)
 
         # シミュレーション実行
         for _ in range(self.simulations):
@@ -171,7 +185,17 @@ class MCTS:
 
             self._backpropagate(node, value)
 
-        # 訪問比率を64要素のリストとして返す
+        return self.root_visit_policy(root)
+
+    def root_visit_policy(self, root: MCTSNode) -> List[float]:
+        """ルートの子ノード訪問回数から訪問比率ポリシーを計算する
+
+        Args:
+            root: 探索済みのルートノード
+
+        Returns:
+            64要素のリスト（各セルの訪問比率、子がなければ全て0.0）
+        """
         policy = [0.0] * (BOARD_SIZE * BOARD_SIZE)
         total_visits = sum(child.visit_count for child in root.children.values())
 
@@ -181,6 +205,126 @@ class MCTS:
                 policy[index] = child.visit_count / total_visits
 
         return policy
+
+    def run_batched(
+        self,
+        requests: List[Tuple[Board, int]],
+        add_noise: bool = False,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
+    ) -> List[MCTSNode]:
+        """複数の (board, color) を1バッチとして並列に探索する
+
+        各ルートの探索は互いに独立しており、search()/get_policy() を1つずつ
+        呼んだ場合と探索アルゴリズム自体は同一（結果も同じ）。異なるのは、
+        各シミュレーションラウンドで全ルート分のリーフ評価をまとめて1回の
+        ニューラルネット呼び出し（NeuralNetwork.predict_batch）にする点のみ。
+        これにより自己対戦で複数ゲームを同時に進めるとGPUのバッチ推論を
+        活用できる。
+
+        Args:
+            requests: (board, color) のリスト。各要素が1つの独立した探索。
+            add_noise: Trueの場合、各ルートの事前確率にディリクレノイズを加える
+            dirichlet_alpha: ディリクレ分布のパラメータ
+            dirichlet_epsilon: ノイズの混合率
+
+        Returns:
+            requests と同じ順序・同じ長さの、探索済み MCTSNode（ルート）のリスト。
+            合法手がないルートは children が空のまま返る。
+        """
+        roots = [MCTSNode(board=board.copy(), color=color) for board, color in requests]
+
+        # ルートの初期展開をバッチで行う
+        expandable = [
+            i for i, root in enumerate(roots) if root.board.get_legal_moves(root.color)
+        ]
+        if expandable:
+            boards = [roots[i].board for i in expandable]
+            colors = [roots[i].color for i in expandable]
+            results = self.neural_network.predict_batch(boards, colors)
+            for i, (policy, _value) in zip(expandable, results):
+                self._finish_expand(roots[i], policy)
+
+        if add_noise:
+            for root in roots:
+                if root.children:
+                    self._add_dirichlet_noise(root, dirichlet_alpha, dirichlet_epsilon)
+
+        active = [i for i in range(len(roots)) if roots[i].children]
+
+        for _ in range(self.simulations):
+            pending = []
+            for i in active:
+                pending_eval = self._select_for_batch(roots[i])
+                if pending_eval is not None:
+                    pending.append((i, *pending_eval))
+
+            if not pending:
+                continue
+
+            boards = [p[2] for p in pending]
+            colors = [p[3] for p in pending]
+            eval_results = self.neural_network.predict_batch(boards, colors)
+
+            for (_i, node, _board, _color, is_pass), (policy, value) in zip(
+                pending, eval_results
+            ):
+                self._apply_batch_result(node, is_pass, policy, value)
+
+        return roots
+
+    def _select_for_batch(
+        self, root: MCTSNode
+    ) -> Optional[Tuple[MCTSNode, Board, int, bool]]:
+        """1シミュレーション分のSELECTフェーズを実行し、必要ならNN評価要求を返す
+
+        ターミナルノードに到達した場合はその場でバックプロパゲートしNoneを返す
+        （このシミュレーションはNN呼び出し不要で完了する）。それ以外の場合は
+        _expand/_evaluate_pass_node が内部で行っていたNN呼び出しをバッチ化できる
+        よう、評価すべき (盤面, 色) を切り出して返す。
+
+        Args:
+            root: 探索対象のルートノード
+
+        Returns:
+            NN評価が不要だった場合はNone。
+            必要な場合は (leaf_node, board, color, is_pass) のタプル。
+            is_pass=True の場合、評価は相手視点で行い、結果は符号反転して
+            バックプロパゲートする必要がある（_evaluate_pass_node と同じ規約）。
+        """
+        node = self._select(root)
+
+        terminal_value = self._get_terminal_value(node)
+        if terminal_value is not None:
+            self._backpropagate(node, terminal_value)
+            return None
+
+        if not node.is_expanded and node.board.get_legal_moves(node.color):
+            return (node, node.board, node.color, False)
+
+        # 合法手がない（かつ非終局）= パスノード。_evaluate_pass_node と同じ規約で
+        # 相手視点の評価を要求する。
+        opponent = WHITE if node.color == BLACK else BLACK
+        return (node, node.board, opponent, True)
+
+    def _apply_batch_result(
+        self, node: MCTSNode, is_pass: bool, policy: np.ndarray, value: float
+    ) -> None:
+        """_select_for_batch が返した評価要求に、バッチ推論結果を適用する
+
+        Args:
+            node: 評価対象のリーフノード
+            is_pass: _select_for_batch が返した is_pass フラグ
+            policy: NN推論結果のポリシー（is_pass=Trueの場合は使用しない）
+            value: NN推論結果のバリュー（評価した色から見た値）
+        """
+        if is_pass:
+            # 相手視点の値なので符号を反転してバックプロパゲート
+            self._backpropagate(node, -value)
+            return
+
+        self._finish_expand(node, policy)
+        self._backpropagate(node, value)
 
     def _select(self, node: MCTSNode) -> MCTSNode:
         """PUCTアルゴリズムでリーフノードまでトラバース
@@ -206,6 +350,24 @@ class MCTS:
             node = best_child
         return node
 
+    def _add_dirichlet_noise(
+        self, root: MCTSNode, alpha: float, epsilon: float
+    ) -> None:
+        """ルート直下の子ノードの事前確率にディリクレノイズを混合する
+
+        AlphaZero方式のセルフプレイ探索多様性確保のための手法。
+        P(s,a) = (1 - epsilon) * P(s,a) + epsilon * noise
+
+        Args:
+            root: ルートノード（展開済み）
+            alpha: ディリクレ分布のパラメータ
+            epsilon: ノイズの混合率
+        """
+        children = list(root.children.values())
+        noise = np.random.dirichlet([alpha] * len(children))
+        for child, n in zip(children, noise):
+            child.prior = (1 - epsilon) * child.prior + epsilon * float(n)
+
     def _puct_score(self, parent: MCTSNode, child: MCTSNode) -> float:
         """PUCTスコアを計算
 
@@ -218,7 +380,7 @@ class MCTS:
         Returns:
             PUCTスコア
         """
-        q_value = child.value
+        q_value = -child.value
         exploration = (
             self.c_puct
             * child.prior
@@ -250,7 +412,20 @@ class MCTS:
         # ニューラルネットワークで評価
         policy, value = self.neural_network.predict(node.board, node.color)
 
-        # 各合法手に対して子ノードを作成
+        self._finish_expand(node, policy)
+
+        return value
+
+    def _finish_expand(self, node: MCTSNode, policy: np.ndarray) -> None:
+        """NN推論結果（ポリシー）を使って各合法手の子ノードを作成する
+
+        _expand と run_batched の両方から使われる、展開処理の共通部分。
+
+        Args:
+            node: 展開するノード（合法手があることが呼び出し側で保証されている）
+            policy: ニューラルネットワークのポリシー出力 shape (64,)
+        """
+        legal_moves = node.board.get_legal_moves(node.color)
         opponent = WHITE if node.color == BLACK else BLACK
         for move in legal_moves:
             child_board = node.board.copy()
@@ -264,8 +439,6 @@ class MCTS:
                 prior=float(prior),
             )
             node.children[move] = child
-
-        return value
 
     def _evaluate_pass_node(self, node: MCTSNode) -> float:
         """パスノード（合法手なし、ゲーム終了でない）を評価

@@ -257,6 +257,100 @@ class TestSelfPlayGenerateGames:
         assert sp._games_completed == 3
 
 
+class TestSelfPlayGenerateGamesParallel:
+    """SelfPlay.generate_games（parallel_games>1、複数ゲームを同時に進めるバッチ化パス）のテスト"""
+
+    def _create_fast_nn(self):
+        """テスト用の実NeuralNetworkインスタンスを作成（predict/predict_batchを差し替えて高速化）"""
+        from ai.neural_network import NeuralNetwork
+
+        nn = NeuralNetwork(model_path=None)
+
+        def fast_predict(board, color):
+            legal_moves = board.get_legal_moves(color)
+            policy = np.zeros(64, dtype=np.float32)
+            if legal_moves:
+                prob = 1.0 / len(legal_moves)
+                for r, c in legal_moves:
+                    policy[r * BOARD_SIZE + c] = prob
+            return policy, 0.0
+
+        def fast_predict_batch(boards, colors):
+            return [fast_predict(b, c) for b, c in zip(boards, colors)]
+
+        nn.predict = fast_predict
+        nn.predict_batch = fast_predict_batch
+        return nn
+
+    def test_generate_games_parallel_produces_valid_samples(self):
+        """parallel_games>1でも、逐次実行と同じ形式のサンプルが生成されることを確認"""
+        nn = self._create_fast_nn()
+        config = SelfPlayConfig(num_games=6, simulations=10, parallel_games=4)
+        sp = SelfPlay(nn, config)
+
+        samples = sp.generate_games(6)
+
+        assert sp._games_completed == 6
+        assert len(samples) > 6
+        for sample in samples:
+            assert isinstance(sample, TrainingSample)
+            assert sample.board_tensor.shape == (3, 8, 8)
+            assert sample.policy.shape == (64,)
+            assert abs(sample.policy.sum() - 1.0) < 1e-5
+            assert sample.value in [-1.0, 0.0, 1.0]
+
+    def test_generate_games_parallel_more_than_num_games(self):
+        """parallel_gamesがnum_gamesより大きくても正しく動作することを確認"""
+        nn = self._create_fast_nn()
+        config = SelfPlayConfig(num_games=2, simulations=10, parallel_games=8)
+        sp = SelfPlay(nn, config)
+
+        samples = sp.generate_games(2)
+
+        assert sp._games_completed == 2
+        assert len(samples) > 0
+
+    def test_generate_games_parallel_matches_sequential_game_count(self):
+        """parallel_games=1と4で、生成されるゲーム数が指定通りであることを確認"""
+        nn = self._create_fast_nn()
+
+        config_seq = SelfPlayConfig(num_games=3, simulations=10, parallel_games=1)
+        sp_seq = SelfPlay(nn, config_seq)
+        samples_seq = sp_seq.generate_games(3)
+
+        config_par = SelfPlayConfig(num_games=3, simulations=10, parallel_games=4)
+        sp_par = SelfPlay(nn, config_par)
+        samples_par = sp_par.generate_games(3)
+
+        assert sp_seq._games_completed == 3
+        assert sp_par._games_completed == 3
+        assert len(samples_seq) > 0
+        assert len(samples_par) > 0
+
+    def test_generate_games_parallel_interruption_keeps_completed_games(self):
+        """中断時に完了済みゲームのサンプルが保持されることを確認（並列パスでも逐次パスと同じ規約）"""
+        nn = self._create_fast_nn()
+        config = SelfPlayConfig(num_games=8, simulations=10, parallel_games=3)
+        sp = SelfPlay(nn, config)
+
+        call_count = [0]
+        original_run_batched = sp.mcts.run_batched
+
+        def run_batched_with_interrupt(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 5:
+                raise KeyboardInterrupt()
+            return original_run_batched(*args, **kwargs)
+
+        sp.mcts.run_batched = run_batched_with_interrupt
+
+        samples = sp.generate_games(8)
+
+        # 中断前に完了したゲーム分のサンプルは保持され、games_completedは8未満
+        assert 0 <= sp._games_completed < 8
+        assert isinstance(samples, list)
+
+
 class TestSelfPlayTrain:
     """SelfPlay.trainのテスト"""
 
@@ -265,11 +359,11 @@ class TestSelfPlayTrain:
         from ai.neural_network import NeuralNetwork
         return NeuralNetwork(model_path=None)
 
-    def test_train_returns_summary(self):
+    def test_train_returns_summary(self, tmp_path):
         """trainがTrainingSummaryを返すことを確認"""
         nn = self._create_real_nn()
         config = SelfPlayConfig(num_games=1, simulations=10, epochs=1, batch_size=2)
-        sp = SelfPlay(nn, config)
+        sp = SelfPlay(nn, config, model_save_path=str(tmp_path / "model.pt"))
         sp._games_completed = 1
 
         samples = [
@@ -305,16 +399,13 @@ class TestSelfPlayTrain:
         assert summary.total_samples == 0
         assert summary.final_loss == 0.0
 
-    def test_train_saves_weights(self, tmp_path, monkeypatch):
+    def test_train_saves_weights(self, tmp_path):
         """学習完了後にモデル重みが保存されることを確認"""
-        import ai.self_play as self_play_module
-
         model_path = str(tmp_path / "model.pt")
-        monkeypatch.setattr(self_play_module, "DEFAULT_MODEL_PATH", model_path)
 
         nn = self._create_real_nn()
         config = SelfPlayConfig(num_games=1, simulations=10, epochs=1, batch_size=2)
-        sp = SelfPlay(nn, config)
+        sp = SelfPlay(nn, config, model_save_path=model_path)
         sp._games_completed = 1
 
         samples = [
@@ -329,11 +420,11 @@ class TestSelfPlayTrain:
 
         assert os.path.exists(model_path)
 
-    def test_train_model_returns_to_eval_mode(self):
+    def test_train_model_returns_to_eval_mode(self, tmp_path):
         """学習後にモデルがevalモードに戻ることを確認"""
         nn = self._create_real_nn()
         config = SelfPlayConfig(num_games=1, simulations=10, epochs=1, batch_size=2)
-        sp = SelfPlay(nn, config)
+        sp = SelfPlay(nn, config, model_save_path=str(tmp_path / "model.pt"))
         sp._games_completed = 1
 
         samples = [
@@ -348,7 +439,7 @@ class TestSelfPlayTrain:
 
         assert not nn.model.training
 
-    def test_train_loss_decreases_with_epochs(self):
+    def test_train_loss_decreases_with_epochs(self, tmp_path):
         """エポック数を増やすとlossが減少する傾向にあることを確認"""
         nn = self._create_real_nn()
 
@@ -365,14 +456,14 @@ class TestSelfPlayTrain:
 
         # Train with 1 epoch
         config1 = SelfPlayConfig(num_games=1, simulations=10, epochs=1, batch_size=10)
-        sp1 = SelfPlay(nn, config1)
+        sp1 = SelfPlay(nn, config1, model_save_path=str(tmp_path / "model1.pt"))
         sp1._games_completed = 1
         summary1 = sp1.train(samples)
 
         # Re-initialize and train with more epochs
         nn2 = self._create_real_nn()
         config2 = SelfPlayConfig(num_games=1, simulations=10, epochs=10, batch_size=10)
-        sp2 = SelfPlay(nn2, config2)
+        sp2 = SelfPlay(nn2, config2, model_save_path=str(tmp_path / "model2.pt"))
         sp2._games_completed = 1
         summary2 = sp2.train(samples)
 
@@ -404,11 +495,11 @@ class TestSelfPlayRun:
         nn.predict = fast_predict
         return nn
 
-    def test_run_returns_summary(self):
+    def test_run_returns_summary(self, tmp_path):
         """runがTrainingSummaryを返すことを確認"""
         nn = self._create_mock_nn()
         config = SelfPlayConfig(num_games=1, simulations=10, epochs=1, batch_size=32)
-        sp = SelfPlay(nn, config)
+        sp = SelfPlay(nn, config, model_save_path=str(tmp_path / "model.pt"))
 
         summary = sp.run()
 
